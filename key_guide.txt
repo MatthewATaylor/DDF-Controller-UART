@@ -1,0 +1,12 @@
+1 - Wave
+	q - vertical wave (default)
+	w - horizontal wave
+2 - Strobe
+	space - stobe on
+3 - Solid
+	q - red
+	w - orange
+	e - yellow
+	r - green
+	t - blue
+	y - purple
