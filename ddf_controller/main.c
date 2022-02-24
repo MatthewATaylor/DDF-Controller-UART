@@ -5,6 +5,10 @@
 
 #include <windows.h>
 
+#define NUM_KEYS 128
+
+uint8_t keyWasPressed[NUM_KEYS] = { 0 };
+
 int main() {
 	HANDLE hSerial = CreateFileA("\\\\.\\COM4", GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
 
@@ -34,52 +38,24 @@ int main() {
 	uint8_t spaceWasPressed = 0;
 
 	while (1) {
-		uint8_t byteToTransmit = 0;
-		if (GetKeyState('1') & 0x8000) {
-			// Wave mode
-			byteToTransmit = 1;
-		}
-		else if (GetKeyState('2') & 0x8000) {
-			// Strobe mode
-			byteToTransmit = 2;
-		}
-		else if (GetKeyState('3') & 0x8000) {
-			// Solid mode
-			byteToTransmit = 3;
-		}
-		else if (GetKeyState('Q') & 0x8000) {
-			byteToTransmit = 10;
-		}
-		else if (GetKeyState('W') & 0x8000) {
-			byteToTransmit = 11;
-		}
-		else if (GetKeyState('W') & 0x8000) {
-			byteToTransmit = 12;
-		}
-		else if (GetKeyState('W') & 0x8000) {
-			byteToTransmit = 13;
-		}
-		else if (GetKeyState('W') & 0x8000) {
-			byteToTransmit = 14;
-		}
-		else if (GetKeyState('W') & 0x8000) {
-			byteToTransmit = 15;
-		}
-		else if (!spaceWasPressed && (GetKeyState(VK_SPACE) & 0x8000)) {
-			byteToTransmit = 100;
-			spaceWasPressed = 1;
-			printf("a\n");
-		}
-		else if (spaceWasPressed && !(GetKeyState(VK_SPACE) & 0x8000)) {
-			// Space released
-			byteToTransmit = 101;
-			spaceWasPressed = 0;
-			printf("b\n");
-		}
-
-		DWORD bytesWritten;
-		if (byteToTransmit) {
-			WriteFile(hSerial, &byteToTransmit, 1, &bytesWritten, NULL);
+		// Loop through ASCII characters
+		for (uint8_t i = 1; i < NUM_KEYS; ++i) {
+			if ((GetKeyState(i) & 0x8000) && !keyWasPressed[i]) {
+				// Pressed
+				uint8_t byteToTransmit = i;
+				DWORD bytesWritten;
+				WriteFile(hSerial, &byteToTransmit, 1, &bytesWritten, NULL);
+				keyWasPressed[i] = 1;
+				printf("Pressed: %u\n", i);
+			}
+			else if (!(GetKeyState(i) & 0x8000) && keyWasPressed[i]) {
+				// Released
+				uint8_t byteToTransmit = i + 128;
+				DWORD bytesWritten;
+				WriteFile(hSerial, &byteToTransmit, 1, &bytesWritten, NULL);
+				keyWasPressed[i] = 0;
+				printf("Released: %u\n", i);
+			}
 		}
 	}
 

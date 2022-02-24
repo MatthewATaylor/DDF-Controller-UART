@@ -1,5 +1,5 @@
 1 - Wave
-	q - vertical wave (default)
+	q - vertical wave
 	w - horizontal wave
 2 - Strobe
 	space - stobe on
@@ -10,3 +10,9 @@
 	r - green
 	t - blue
 	y - purple
+	u - bright white
+	i - warm white
+
+Arrow up - increase brightness
+Arrow down - decrease brightness
+
