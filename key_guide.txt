@@ -1,9 +1,4 @@
-1 - Wave
-	q - vertical wave
-	w - horizontal wave
-2 - Strobe
-	space - stobe on
-3 - Solid
+1 - Solid color
 	q - red
 	w - orange
 	e - yellow
@@ -12,7 +7,12 @@
 	y - purple
 	u - bright white
 	i - warm white
+2 - Wave
+	q - vertical wave
+	w - horizontal wave
 
 Arrow up - increase brightness
 Arrow down - decrease brightness
-
+Shift - switch between background and interactive mode
+	Background - looping animation
+	Interactive - trigger with spacebar
