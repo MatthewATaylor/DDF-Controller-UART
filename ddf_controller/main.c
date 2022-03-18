@@ -16,10 +16,9 @@
 // Serial command codes
 #define SET_ROWS_COLOR_CODE 22
 
-#define COLOR_CHANGE_PERIOD_MS 600
-#define FADE_PERIOD_MS 900
-#define RAINBOW_PERIOD_MS 1500
+#define RAINBOW_PERIOD_MS 800
 
+#define COLOR_CHANGE_THRESHOLD 0.1
 #define MIN_AUDIO_LEVEL 0
 
 // focus = WAVE_SPEED * t
@@ -46,9 +45,8 @@ enum ColorMode {
 enum AnimationMode {
 	ANIMATION_OFF,
 	ANIMATION_SOLID,
-	ANIMATION_STROBE,
-	ANIMATION_FADE,
-	ANIMATION_WAVE
+	ANIMATION_WAVE,
+	ANIMATION_RAINBOW
 };
 
 enum WaveDirection {
@@ -76,6 +74,14 @@ struct WaveData {
 
 struct RGBColor rowColors[LED_ROWS];
 double sinLut[SIN_LUT_SAMPLES];
+
+const struct RGBColor red = { 50, 0, 0 };
+const struct RGBColor orange = { 49, 5, 0 };
+const struct RGBColor yellow = { 30, 20, 0 };
+const struct RGBColor green = { 0, 50, 0 };
+const struct RGBColor blue = { 0, 0, 50 };
+const struct RGBColor purple = { 25, 0, 25 };
+const struct RGBColor white = { 16, 16, 16 };
 
 struct RGBColor hsvToRgb(struct HSVColor* color) {
 	double c = color->v * color->s;
@@ -129,6 +135,9 @@ void initSinLut() {
 double getSinLut(double theta) {
 	while (theta >= 2 * PI) {
 		theta -= 2 * PI;
+	}
+	while (theta < 0) {
+		theta += 2 * PI;
 	}
 	return sinLut[(uint16_t) (theta / (2 * PI) * SIN_LUT_SAMPLES)];
 }
@@ -216,6 +225,8 @@ int main() {
 	long animationStartTime = 0;
 	struct RGBColor solidColor = { 0, 0, 0 };
 	double audioLevel = MIN_AUDIO_LEVEL;
+	uint8_t hasChangedRainbow = 0;
+	double brightness = 1.0;
 
 	double waveBrightnesses[WAVE_SIZE] = { 0 };
 	double fadeBrightness = 0;  // [0, 1] multiplier
@@ -255,7 +266,11 @@ int main() {
 			newAudioLevel *= 1 - MIN_AUDIO_LEVEL;  // [0, 1 - MIN_AUDIO_LEVEL]
 			newAudioLevel += MIN_AUDIO_LEVEL;  // [MIN_AUDIO_LEVEL, 1]
 
-			audioLevel = 0.5 * audioLevel + 0.5 * newAudioLevel;
+			audioLevel = 0.45 * audioLevel + 0.55 * newAudioLevel;
+
+			if (audioLevel <= COLOR_CHANGE_THRESHOLD) {
+				hasChangedRainbow = 0;
+			}
 		}
 
 
@@ -281,25 +296,20 @@ int main() {
 							rainbowSegment = 0;
 						}
 					}
-					else if (i == 16) {
-						// Shift key - switch between colors for multi-color ColorMode
-						rainbowPeriodStartTime = millis;
-						++rainbowSegment;
-						if (colorMode == RAINBOW) {
-							// Three-segment ColorMode
-							if (rainbowSegment > 2) {
-								rainbowSegment = 0;
-							}
+					else if (i == 37) {
+						brightness -= 0.05;
+						if (brightness < 0) {
+							brightness = 0;
 						}
-						else {
-							// Two-segment ColorMode
-							if (rainbowSegment > 1) {
-								rainbowSegment = 0;
-							}
+					}
+					else if (i == 39) {
+						brightness += 0.05;
+						if (brightness > 1.5) {
+							brightness = 1.5;
 						}
 					}
 					else if (i == 'Z') {
-						// Toggle on
+						// Toggle solid
 						if (animationMode == ANIMATION_SOLID) {
 							animationMode = ANIMATION_OFF;
 						}
@@ -308,13 +318,14 @@ int main() {
 						}
 					}
 					else if (i == 'X') {
-						// Strobe on
-						animationMode = ANIMATION_STROBE;
-					}
-					else if (i == 'C') {
-						// Fade
-						animationMode = ANIMATION_FADE;
-						animationStartTime = millis;
+						// Toggle rainbow
+						if (animationMode == ANIMATION_RAINBOW) {
+							animationMode = ANIMATION_OFF;
+						}
+						else {
+							animationMode = ANIMATION_RAINBOW;
+							animationStartTime = millis;
+						}
 					}
 					else if (i == 38 || i == 40) {
 						// Wave
@@ -345,143 +356,183 @@ int main() {
 				// Released
 				keyWasPressed[i] = 0;
 				printf("Released: %u\n", i);
-
-				if (i == 'X') {
-					// Strobe off
-					animationMode = ANIMATION_OFF;
-				}
 			}
 		}
 
 		switch (colorMode) {
 		case RED:
-			solidColor.r = 50;
-			solidColor.g = 0;
-			solidColor.b = 0;
+			solidColor = red;
 			break;
 		case ORANGE:
-			solidColor.r = 50;
-			solidColor.g = 15;
-			solidColor.b = 0;
+			solidColor = orange;
 			break;
 		case YELLOW:
-			solidColor.r = 25;
-			solidColor.g = 25;
-			solidColor.b = 0;
+			solidColor = yellow;
 			break;
 		case GREEN:
-			solidColor.r = 0;
-			solidColor.g = 50;
-			solidColor.b = 0;
+			solidColor = green;
 			break;
 		case BLUE:
-			solidColor.r = 0;
-			solidColor.g = 0;
-			solidColor.b = 50;
+			solidColor = blue;
 			break;
 		case PURPLE:
-			solidColor.r = 25;
-			solidColor.g = 0;
-			solidColor.b = 25;
+			solidColor = purple;
 			break;
 		case WHITE:
-			solidColor.r = 16;
-			solidColor.g = 16;
-			solidColor.b = 16;
+			solidColor = white;
 			break;
 		case RAINBOW:
 			// Divide the rainbow period into three sinusoidal segments
 			// One period of the sinusoid is 2/3 the period of the rainbow animation
-			if (millis - rainbowPeriodStartTime < RAINBOW_PERIOD_MS / 3) {
-				double cosine = getCosLut(RAINBOW_OMEGA * (millis - rainbowPeriodStartTime));
-				if (rainbowSegment == 0) {
-					solidColor.r = (uint8_t) (20 * cosine + 20);
-					solidColor.g = (uint8_t) (20 * -cosine + 20);
-					solidColor.b = 0;
+			if (animationMode == ANIMATION_SOLID) {
+				switch (rainbowSegment) {
+				case 0:
+					solidColor = red;
+					break;
+				case 1:
+					solidColor = orange;
+					break;
+				case 2:
+					solidColor = yellow;
+					break;
+				case 3:
+					solidColor = green;
+					break;
+				case 4:
+					solidColor = blue;
+					break;
+				case 5:
+					solidColor = purple;
+					break;
 				}
-				else if (rainbowSegment == 1) {
-					solidColor.r = 0;
-					solidColor.g = (uint8_t) (20 * cosine + 20);
-					solidColor.b = (uint8_t) (20 * -cosine + 20);
-				}
-				else if (rainbowSegment == 2) {
-					solidColor.r = (uint8_t) (20 * -cosine + 20);
-					solidColor.g = 0;
-					solidColor.b = (uint8_t) (20 * cosine + 20);
+				if (audioLevel > COLOR_CHANGE_THRESHOLD && !hasChangedRainbow) {
+					++rainbowSegment;
+					if (rainbowSegment > 5) {
+						rainbowSegment = 0;
+					}
+					hasChangedRainbow = 1;
 				}
 			}
-			else if (animationMode == ANIMATION_FADE || animationMode == ANIMATION_WAVE || animationMode == ANIMATION_SOLID) {
-				// Automatically switch between colors for some animation modes
-				rainbowPeriodStartTime = millis;
-				++rainbowSegment;
-				if (rainbowSegment > 2) {
-					rainbowSegment = 0;
+			else {
+				if (millis - rainbowPeriodStartTime < RAINBOW_PERIOD_MS / 3) {
+					double cosine = getCosLut(RAINBOW_OMEGA * (millis - rainbowPeriodStartTime));
+					if (rainbowSegment == 0) {
+						solidColor.r = (uint8_t)(20 * cosine + 20);
+						solidColor.g = (uint8_t)(20 * -cosine + 20);
+						solidColor.b = 0;
+					}
+					else if (rainbowSegment == 1) {
+						solidColor.r = 0;
+						solidColor.g = (uint8_t)(20 * cosine + 20);
+						solidColor.b = (uint8_t)(20 * -cosine + 20);
+					}
+					else if (rainbowSegment == 2) {
+						solidColor.r = (uint8_t)(20 * -cosine + 20);
+						solidColor.g = 0;
+						solidColor.b = (uint8_t)(20 * cosine + 20);
+					}
+				}
+				else {
+					rainbowPeriodStartTime = millis;
+					++rainbowSegment;
+					if (rainbowSegment > 2) {
+						rainbowSegment = 0;
+					}
 				}
 			}
 			break;
 		case RED_BLUE:
-			if (millis - rainbowPeriodStartTime < COLOR_CHANGE_PERIOD_MS / 2) {
-				solidColor.r = (uint8_t) (
-					20 * getCosLut(2 * PI / COLOR_CHANGE_PERIOD_MS * (millis - rainbowPeriodStartTime) + ((rainbowSegment == 0) ? 0 : PI)) + 20
-				);
-				solidColor.g = 0;
-				solidColor.b = (uint8_t) (
-					20 * getCosLut(2 * PI / COLOR_CHANGE_PERIOD_MS * (millis - rainbowPeriodStartTime) + ((rainbowSegment == 0) ? PI : 0)) + 20
-				);
+			if (animationMode == ANIMATION_SOLID) {
+				switch (rainbowSegment) {
+				case 0:
+					solidColor = red;
+					break;
+				case 1:
+					solidColor = blue;
+					break;
+				}
+				if (audioLevel > COLOR_CHANGE_THRESHOLD && !hasChangedRainbow) {
+					++rainbowSegment;
+					if (rainbowSegment > 1) {
+						rainbowSegment = 0;
+					}
+					hasChangedRainbow = 1;
+				}
 			}
-			else if (animationMode == ANIMATION_FADE || animationMode == ANIMATION_WAVE) {
-				// Automatically switch between colors for some animation modes
-				rainbowPeriodStartTime = millis;
-				++rainbowSegment;
-				if (rainbowSegment > 1) {
-					rainbowSegment = 0;
+			else {
+				if (millis - rainbowPeriodStartTime < RAINBOW_PERIOD_MS / 3) {
+					solidColor.r = (uint8_t)(
+						20 * getCosLut(2 * PI / RAINBOW_PERIOD_MS * (millis - rainbowPeriodStartTime) + ((rainbowSegment == 0) ? 0 : PI)) + 20
+					);
+					solidColor.g = 0;
+					solidColor.b = (uint8_t)(
+						20 * getCosLut(2 * PI / RAINBOW_PERIOD_MS * (millis - rainbowPeriodStartTime) + ((rainbowSegment == 0) ? PI : 0)) + 20
+					);
+				}
+				else {
+					rainbowPeriodStartTime = millis;
+					++rainbowSegment;
+					if (rainbowSegment > 1) {
+						rainbowSegment = 0;
+					}
 				}
 			}
 			break;
 		case GREEN_BLUE:
-			if (millis - rainbowPeriodStartTime < COLOR_CHANGE_PERIOD_MS / 2) {
-				solidColor.r = 0;
-				solidColor.g = (uint8_t) (
-					20 * getCosLut(2 * PI / COLOR_CHANGE_PERIOD_MS * (millis - rainbowPeriodStartTime) + ((rainbowSegment == 0) ? 0 : PI)) + 20
-				);
-				solidColor.b = (uint8_t) (
-					20 * getCosLut(2 * PI / COLOR_CHANGE_PERIOD_MS * (millis - rainbowPeriodStartTime) + ((rainbowSegment == 0) ? PI : 0)) + 20
-				);
+			if (animationMode == ANIMATION_SOLID) {
+				switch (rainbowSegment) {
+				case 0:
+					solidColor = green;
+					break;
+				case 1:
+					solidColor = blue;
+					break;
+				}
+				if (audioLevel > COLOR_CHANGE_THRESHOLD && !hasChangedRainbow) {
+					++rainbowSegment;
+					if (rainbowSegment > 1) {
+						rainbowSegment = 0;
+					}
+					hasChangedRainbow = 1;
+				}
 			}
-			else if (animationMode == ANIMATION_FADE || animationMode == ANIMATION_WAVE) {
-				// Automatically switch between colors for some animation modes
-				rainbowPeriodStartTime = millis;
-				++rainbowSegment;
-				if (rainbowSegment > 1) {
-					rainbowSegment = 0;
+			else {
+				if (millis - rainbowPeriodStartTime < RAINBOW_PERIOD_MS / 3) {
+					solidColor.r = 0;
+					solidColor.g = (uint8_t)(
+						20 * getCosLut(2 * PI / RAINBOW_PERIOD_MS * (millis - rainbowPeriodStartTime) + ((rainbowSegment == 0) ? 0 : PI)) + 20
+					);
+					solidColor.b = (uint8_t)(
+						20 * getCosLut(2 * PI / RAINBOW_PERIOD_MS * (millis - rainbowPeriodStartTime) + ((rainbowSegment == 0) ? PI : 0)) + 20
+						);
+				}
+				else {
+					rainbowPeriodStartTime = millis;
+					++rainbowSegment;
+					if (rainbowSegment > 1) {
+						rainbowSegment = 0;
+					}
 				}
 			}
 			break;
 		}
 
+		solidColor.r = (uint8_t)(solidColor.r * brightness);
+		solidColor.g = (uint8_t)(solidColor.g * brightness);
+		solidColor.b = (uint8_t)(solidColor.b * brightness);
+
 		// Adjust brightness based on audio level
-		solidColor.r = (uint8_t) (solidColor.r * audioLevel);
-		solidColor.g = (uint8_t) (solidColor.g * audioLevel);
-		solidColor.b = (uint8_t) (solidColor.b * audioLevel);
+		if (animationMode != ANIMATION_WAVE) {
+			solidColor.r = (uint8_t)(solidColor.r * audioLevel);
+			solidColor.g = (uint8_t)(solidColor.g * audioLevel);
+			solidColor.b = (uint8_t)(solidColor.b * audioLevel);
+		}
 
 		switch (animationMode) {
 		case ANIMATION_OFF:
 			setOff(fpgaSerial);
 			break;
 		case ANIMATION_SOLID:
-		case ANIMATION_STROBE:
-			setColor(fpgaSerial, &solidColor);
-			break;
-		case ANIMATION_FADE:
-			if (millis - animationStartTime > FADE_PERIOD_MS / 2) {
-				fadeBrightness = 0;
-			}
-			else {
-				fadeBrightness = getSinLut(2 * PI / FADE_PERIOD_MS * (millis - animationStartTime));
-			}
-			solidColor.r = (uint8_t) (solidColor.r * fadeBrightness);
-			solidColor.g = (uint8_t) (solidColor.g * fadeBrightness);
-			solidColor.b = (uint8_t) (solidColor.b * fadeBrightness);
 			setColor(fpgaSerial, &solidColor);
 			break;
 		case ANIMATION_WAVE:
@@ -529,48 +580,35 @@ int main() {
 				}
 			}
 			setRowColors(fpgaSerial);
-		}
-
-		/*
-		if (animationMode == SOLID_CODE) {
-			struct RGBColor color;
-			color.r = (uint8_t) (12 * sin(2 * PI / 2000.0 * millis) + 12);
-			color.g = 0;
-			color.b = (uint8_t) (12 * sin(2 * PI / 2000.0 * millis + PI) + 12);
-			setColor(hSerial, &color);
-		}
-		else if (animationMode == ROW_CODE) {
-			//focusRow = (millis / 8) % LED_ROWS; //LED_ROWS / 2 * sin(2 * PI / 2000.0 * millis) + LED_ROWS / 2;
-			
-			for (uint8_t i = 0; i < LED_ROWS; i += 3) {
-				struct HSVColor hsvColor;
-				hsvColor.h = 180 * sin(2 * PI / 3000.0 * millis + (double) i / LED_ROWS * PI) + 180;
-				hsvColor.s = 0.7;
-				hsvColor.v = 0.02;
-				struct RGBColor rowColor = hsvToRgb(&hsvColor);
-
-				struct RGBColor rowColor1;
-				rowColor1.r = (uint8_t)(12 * sin(2 * PI / 500.0 * millis) + 12);
-				rowColor1.g = 0;
-				rowColor1.b = 0;
-
-				struct RGBColor rowColor2;
-				rowColor2.r = 0;
-				rowColor2.g = (uint8_t)(12 * sin(2 * PI / 500.0 * millis + PI / 2.0) + 12);
-				rowColor2.b = 0;
-
-				struct RGBColor rowColor3;
-				rowColor3.r = 0;
-				rowColor3.g = 0;
-				rowColor3.b = (uint8_t)(12 * sin(2 * PI / 500.0 * millis + PI) + 12);
-
-				rowColors[i] = rowColor1;
-				rowColors[i + 1] = rowColor2;
-				rowColors[i + 2] = rowColor3;
+			break;
+		case ANIMATION_RAINBOW:
+			for (uint8_t i = 0; i < LED_ROWS; ++i) {
+				uint8_t adjustedI = (uint8_t)(i + (millis - animationStartTime) / 12.0);
+				while (adjustedI >= LED_ROWS) {
+					adjustedI -= LED_ROWS;
+				}
+				if (adjustedI<= LED_ROWS / 3) {
+					double cosine = getCosLut((double)adjustedI / LED_ROWS * 2 * PI);
+					rowColors[i].r = (uint8_t)((20 * cosine + 20) * brightness);
+					rowColors[i].g = (uint8_t)((20 * -cosine + 20) * brightness);
+					rowColors[i].b = 0;
+				}
+				else if (adjustedI <= 2 * LED_ROWS / 3) {
+					double cosine = getCosLut((double)adjustedI / LED_ROWS * 2 * PI - 2 * PI / 3);
+					rowColors[i].r = 0;
+					rowColors[i].g = (uint8_t)((20 * cosine + 20) * brightness);
+					rowColors[i].b = (uint8_t)((20 * -cosine + 20) * brightness);
+				}
+				else {
+					double cosine = getCosLut((double)adjustedI / LED_ROWS * 2 * PI - 4 * PI / 3);
+					rowColors[i].r = (uint8_t)((20 * -cosine + 20) * brightness);
+					rowColors[i].g = 0;
+					rowColors[i].b = (uint8_t)((20 * cosine + 20) * brightness);
+				}
 			}
-			setRowColor(hSerial, rowColors);
+			setRowColors(fpgaSerial);
+			break;
 		}
-		*/
 	}
 
 	CloseHandle(fpgaSerial);
