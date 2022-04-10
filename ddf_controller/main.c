@@ -10,11 +10,16 @@
 
 // LED_ROWS is actually half the real number of rows for performance purposes
 #define LED_ROWS 36
+#define FULL_LED_ROWS 72
+#define LED_COLS 165
+
 #define NUM_KEYS 128
 #define CMD_BYTE 255
 
 // Serial command codes
 #define SET_ROWS_COLOR_CODE 22
+#define SET_PONG_DATA_CODE 23
+#define SET_PONG_SCORE_CODE 24
 
 #define RAINBOW_PERIOD_MS 800
 
@@ -28,6 +33,15 @@
 #define MAX_NUM_WAVES 4
 
 #define SIN_LUT_SAMPLES 4096
+
+// Pong
+#define PADDLE_WIDTH 5
+#define PADDLE_HEIGHT 16
+#define PADDLE_SPEED 0.00006
+#define BALL_WIDTH 6
+#define BALL_HEIGHT 3
+#define BALL_SPEED 0.000075
+#define MAX_BALL_ANGLE 0.9
 
 enum ColorMode {
 	RAINBOW,
@@ -46,7 +60,9 @@ enum AnimationMode {
 	ANIMATION_OFF,
 	ANIMATION_SOLID,
 	ANIMATION_WAVE,
-	ANIMATION_RAINBOW
+	ANIMATION_RAINBOW,
+	ANIMATION_ALTERNATING,
+	ANIMATION_PONG
 };
 
 enum WaveDirection {
@@ -72,6 +88,18 @@ struct WaveData {
 	uint8_t animationIsFinished;
 };
 
+struct Paddle {
+	uint8_t score;
+	double y;
+	struct RGBColor color;
+};
+
+struct Ball {
+	double x, y;
+	double vx, vy;
+	struct RGBColor color;
+};
+
 struct RGBColor rowColors[LED_ROWS];
 double sinLut[SIN_LUT_SAMPLES];
 
@@ -82,6 +110,9 @@ const struct RGBColor green = { 0, 50, 0 };
 const struct RGBColor blue = { 0, 0, 50 };
 const struct RGBColor purple = { 25, 0, 25 };
 const struct RGBColor white = { 16, 16, 16 };
+
+unsigned long long pongStart = 0;
+unsigned long long pongEnd = 0;
 
 struct RGBColor hsvToRgb(struct HSVColor* color) {
 	double c = color->v * color->s;
@@ -126,7 +157,18 @@ struct RGBColor hsvToRgb(struct HSVColor* color) {
 	return result;
 }
 
+unsigned long long getMicros() {
+	FILETIME ft;
+	GetSystemTimeAsFileTime(&ft);
+	unsigned long long tt = ft.dwHighDateTime;
+	tt <<= 32;
+	tt |= ft.dwLowDateTime;
+	tt /= 10;
+	return tt;
+}
+
 void initSinLut() {
+	// Precompute sin for better performance
 	for (uint16_t i = 0; i < SIN_LUT_SAMPLES; ++i) {
 		sinLut[i] = sin((double) i / SIN_LUT_SAMPLES * 2 * PI);
 	}
@@ -144,6 +186,31 @@ double getSinLut(double theta) {
 
 double getCosLut(double theta) {
 	return getSinLut(theta + PI / 2.0);
+}
+
+void resetPong(struct Paddle *paddle1, struct Paddle *paddle2, struct Ball *ball, uint8_t serverIs1) {
+	paddle1->y = FULL_LED_ROWS / 2.0 - PADDLE_HEIGHT / 2.0;
+	paddle2->y = FULL_LED_ROWS / 2.0 - PADDLE_HEIGHT / 2.0;
+	ball->x = LED_COLS / 2.0 - BALL_WIDTH / 2.0;
+	ball->y = FULL_LED_ROWS / 2.0 - BALL_WIDTH / 2.0;
+	
+	if (serverIs1) {
+		ball->vx = -BALL_SPEED;
+	}
+	else {
+		ball->vx = BALL_SPEED;
+	}
+	
+	ball->vy = 0;
+
+	pongStart = getMicros();
+	pongEnd = pongStart;
+}
+
+void resetPongAndScore(struct Paddle* paddle1, struct Paddle* paddle2, struct Ball* ball) {
+	resetPong(paddle1, paddle2, ball, 1);
+	paddle1->score = 0;
+	paddle2->score = 0;
 }
 
 // Write contents of global rowColors array to FPGA
@@ -172,6 +239,32 @@ void setColor(HANDLE hSerial, struct RGBColor* color) {
 	setRowColors(hSerial);
 }
 
+// Send updated pong game state to FPGA (every frame)
+void setPongData(HANDLE hSerial, struct Paddle *paddle1, struct Paddle *paddle2, struct Ball *ball) {
+	uint8_t packet[6];
+	packet[0] = CMD_BYTE;
+	packet[1] = SET_PONG_DATA_CODE;
+	packet[2] = (uint8_t) paddle1->y;
+	packet[3] = (uint8_t) paddle2->y;
+	packet[4] = (uint8_t) ball->x;
+	packet[5] = (uint8_t) ball->y;
+
+	DWORD bytesWritten;
+	WriteFile(hSerial, packet, 6, &bytesWritten, NULL);
+}
+
+// Send updated pong score to FPGA (when point is scored)
+void setPongScore(HANDLE hSerial, uint8_t score1, uint8_t score2) {
+	uint8_t packet[4];
+	packet[0] = CMD_BYTE;
+	packet[1] = SET_PONG_SCORE_CODE;
+	packet[2] = score1;
+	packet[3] = score2;
+
+	DWORD bytesWritten;
+	WriteFile(hSerial, packet, 4, &bytesWritten, NULL);
+}
+
 // Fill global rowColors array with zeros and write to FPGA
 void setOff(HANDLE hSerial) {
 	struct RGBColor color = { 0, 0, 0 };
@@ -179,6 +272,8 @@ void setOff(HANDLE hSerial) {
 }
 
 HANDLE connectSerial(LPCSTR port) {
+	// Open serial port using Windows API
+
 	HANDLE hSerial = CreateFileA(port, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
 
 	if (hSerial == INVALID_HANDLE_VALUE) {
@@ -210,12 +305,14 @@ HANDLE connectSerial(LPCSTR port) {
 int main() {
 	initSinLut();
 
-	HANDLE fpgaSerial = connectSerial("\\\\.\\COM4");
-	HANDLE arduinoSerial = connectSerial("\\\\.\\COM5");
+	HANDLE fpgaSerial = connectSerial("\\\\.\\COM4");  // For interfacing with LEDs
+	HANDLE arduinoSerial = connectSerial("\\\\.\\COM5");  // For interfacing with Arduino beat tracking
 
 	struct timeb start, end;
 	ftime(&start);
 	long millis = 0;
+
+	unsigned long frameTime = 0;
 
 	uint8_t keyWasPressed[NUM_KEYS] = { 0 };
 	uint8_t isAcceptingInput = 1;
@@ -234,6 +331,15 @@ int main() {
 	uint8_t rainbowSegment = 0;
 	struct WaveData waveData[MAX_NUM_WAVES];
 	uint8_t nextWaveIndex = 0;
+
+	// Pong
+	struct Paddle paddle1;
+	struct Paddle paddle2;
+	struct Ball ball;
+	resetPong(&paddle1, &paddle2, &ball, 1);
+	paddle1.color = white;
+	paddle2.color = white;
+	ball.color = white;
 
 	const double RAINBOW_OMEGA = 2 * PI / (2 * RAINBOW_PERIOD_MS / 3.0);
 
@@ -273,7 +379,6 @@ int main() {
 			}
 		}
 
-
 		// Loop through ASCII characters
 		for (uint8_t i = 1; i < NUM_KEYS; ++i) {
 			if ((GetKeyState(i) & 0x8000) && !keyWasPressed[i]) {
@@ -289,65 +394,94 @@ int main() {
 					keyWasPressed[i] = 1;
 					printf("Pressed: %u\n", i);
 
-					if (i >= '0' && i <= '9') {
-						colorMode = i - '0';
-						if (colorMode == RAINBOW || colorMode == RED_BLUE || colorMode == GREEN_BLUE) {
-							rainbowPeriodStartTime = millis;
-							rainbowSegment = 0;
-						}
-					}
-					else if (i == 37) {
-						brightness -= 0.05;
-						if (brightness < 0) {
-							brightness = 0;
-						}
-					}
-					else if (i == 39) {
-						brightness += 0.05;
-						if (brightness > 1.5) {
-							brightness = 1.5;
-						}
-					}
-					else if (i == 'Z') {
-						// Toggle solid
-						if (animationMode == ANIMATION_SOLID) {
+					if (i == 'G') {
+						// Toggle pong
+						if (animationMode == ANIMATION_PONG) {
 							animationMode = ANIMATION_OFF;
 						}
 						else {
-							animationMode = ANIMATION_SOLID;
+							animationMode = ANIMATION_PONG;
+							resetPongAndScore(&paddle1, &paddle2, &ball);
+							setPongScore(fpgaSerial, paddle1.score, paddle2.score);
 						}
 					}
-					else if (i == 'X') {
-						// Toggle rainbow
-						if (animationMode == ANIMATION_RAINBOW) {
-							animationMode = ANIMATION_OFF;
-						}
-						else {
-							animationMode = ANIMATION_RAINBOW;
-							animationStartTime = millis;
-						}
-					}
-					else if (i == 38 || i == 40) {
-						// Wave
 
-						animationMode = ANIMATION_WAVE;
-
-						struct WaveData newWaveData;
-						newWaveData.animationStartingTime = millis;
-						if (i == 38) {
-							newWaveData.direction = WAVE_DIR_UP;
-							newWaveData.focus = LED_ROWS - 1;
+					if (animationMode != ANIMATION_PONG) {
+						if (i >= '0' && i <= '9') {
+							colorMode = i - '0';
+							if (colorMode == RAINBOW || colorMode == RED_BLUE || colorMode == GREEN_BLUE) {
+								rainbowPeriodStartTime = millis;
+								rainbowSegment = 0;
+							}
 						}
-						else {
-							newWaveData.direction = WAVE_DIR_DOWN;
-							newWaveData.focus = 0;
+						else if (i == 'L') {
+							// Reconnect serial
+							CloseHandle(fpgaSerial);
+							CloseHandle(arduinoSerial);
+							fpgaSerial = connectSerial("\\\\.\\COM4");
+							arduinoSerial = connectSerial("\\\\.\\COM5");
 						}
-						newWaveData.animationIsFinished = 0;
-						waveData[nextWaveIndex] = newWaveData;
+						else if (i == 37) {
+							brightness -= 0.05;
+							if (brightness < 0) {
+								brightness = 0;
+							}
+						}
+						else if (i == 39) {
+							brightness += 0.05;
+							if (brightness > 1.5) {
+								brightness = 1.5;
+							}
+						}
+						else if (i == 'Z') {
+							// Toggle solid
+							if (animationMode == ANIMATION_SOLID) {
+								animationMode = ANIMATION_OFF;
+							}
+							else {
+								animationMode = ANIMATION_SOLID;
+							}
+						}
+						else if (i == 'X') {
+							// Toggle rainbow
+							if (animationMode == ANIMATION_RAINBOW) {
+								animationMode = ANIMATION_OFF;
+							}
+							else {
+								animationMode = ANIMATION_RAINBOW;
+								animationStartTime = millis;
+							}
+						}
+						else if (i == 'C') {
+							if (animationMode == ANIMATION_ALTERNATING) {
+								animationMode = ANIMATION_OFF;
+							}
+							else {
+								animationMode = ANIMATION_ALTERNATING;
+							}
+						}
+						else if (i == 38 || i == 40) {
+							// Wave
 
-						++nextWaveIndex;
-						if (nextWaveIndex >= MAX_NUM_WAVES) {
-							nextWaveIndex = 0;
+							animationMode = ANIMATION_WAVE;
+
+							struct WaveData newWaveData;
+							newWaveData.animationStartingTime = millis;
+							if (i == 38) {
+								newWaveData.direction = WAVE_DIR_UP;
+								newWaveData.focus = LED_ROWS - 1;
+							}
+							else {
+								newWaveData.direction = WAVE_DIR_DOWN;
+								newWaveData.focus = 0;
+							}
+							newWaveData.animationIsFinished = 0;
+							waveData[nextWaveIndex] = newWaveData;
+
+							++nextWaveIndex;
+							if (nextWaveIndex >= MAX_NUM_WAVES) {
+								nextWaveIndex = 0;
+							}
 						}
 					}
 				}
@@ -528,6 +662,8 @@ int main() {
 			solidColor.b = (uint8_t)(solidColor.b * audioLevel);
 		}
 
+		uint8_t sine1 = 0;
+		uint8_t sine2 = 0;
 		switch (animationMode) {
 		case ANIMATION_OFF:
 			setOff(fpgaSerial);
@@ -583,13 +719,13 @@ int main() {
 			break;
 		case ANIMATION_RAINBOW:
 			for (uint8_t i = 0; i < LED_ROWS; ++i) {
-				uint8_t adjustedI = (uint8_t)(i + (millis - animationStartTime) / 12.0);
+				uint8_t adjustedI = i;//(uint8_t)(i + (millis - animationStartTime) / 12.0);
 				while (adjustedI >= LED_ROWS) {
 					adjustedI -= LED_ROWS;
 				}
 				if (adjustedI<= LED_ROWS / 3) {
 					double cosine = getCosLut((double)adjustedI / LED_ROWS * 2 * PI);
-					rowColors[i].r = (uint8_t)((20 * cosine + 20) * brightness);
+					rowColors[i].r = (uint8_t)((20 * cosine + 20) * brightness );
 					rowColors[i].g = (uint8_t)((20 * -cosine + 20) * brightness);
 					rowColors[i].b = 0;
 				}
@@ -607,6 +743,112 @@ int main() {
 				}
 			}
 			setRowColors(fpgaSerial);
+			break;
+		case ANIMATION_ALTERNATING:
+			sine1 = (uint8_t)(20 * getSinLut(2 * PI / 600 * millis) + 20);
+			sine2 = (uint8_t)(20 * getSinLut(2 * PI / 600 * millis + PI / 2) + 20);
+			for (uint8_t i = 0; i < LED_ROWS; ++i) {
+				if (i % 2 == 0) {
+					rowColors[i].r = sine1;
+					rowColors[i].g = 0;
+					rowColors[i].b = sine2;
+				}
+				else {
+					rowColors[i].r = sine2;
+					rowColors[i].g = 0;
+					rowColors[i].b = sine1;
+				}
+			}
+			setRowColors(fpgaSerial);
+			break;
+		case ANIMATION_PONG:
+			pongEnd = getMicros();
+			frameTime = (unsigned long) (pongEnd - pongStart);
+			pongStart = pongEnd;
+
+			// Control paddles
+			if (keyWasPressed['Q']) {
+				paddle1.y -= PADDLE_SPEED * frameTime;
+			}
+			else if (keyWasPressed['A']) {
+				paddle1.y += PADDLE_SPEED * frameTime;
+			}
+			if (keyWasPressed['O']) {
+				paddle2.y -= PADDLE_SPEED * frameTime;
+			}
+			else if (keyWasPressed['L']) {
+				paddle2.y += PADDLE_SPEED * frameTime;
+			}
+
+			// Paddle bounds
+			if (paddle1.y < 0) {
+				paddle1.y = 0;
+			}
+			else if (paddle1.y > FULL_LED_ROWS - PADDLE_HEIGHT) {
+				paddle1.y = FULL_LED_ROWS - PADDLE_HEIGHT;
+			}
+			if (paddle2.y < 0) {
+				paddle2.y = 0;
+			}
+			else if (paddle2.y > FULL_LED_ROWS - PADDLE_HEIGHT) {
+				paddle2.y = FULL_LED_ROWS - PADDLE_HEIGHT;
+			}
+
+			// Ball + wall collisions
+			if (ball.y < 0) {
+				ball.y = 0;
+				ball.vy *= -1;
+			}
+			else if (ball.y > FULL_LED_ROWS - BALL_HEIGHT) {
+				ball.y = FULL_LED_ROWS - BALL_HEIGHT;
+				ball.vy *= -1;
+			}
+
+			// Ball + left paddle collisions
+			if (ball.x < PADDLE_WIDTH && ball.y > paddle1.y - BALL_HEIGHT && ball.y < paddle1.y + PADDLE_HEIGHT) {
+				double theta = ((paddle1.y + PADDLE_HEIGHT / 2.0) - (ball.y + BALL_HEIGHT / 2.0)) / (PADDLE_HEIGHT / 2.0) * MAX_BALL_ANGLE;
+				ball.vx = BALL_SPEED * cos(theta);
+				ball.vy = BALL_SPEED * -sin(theta);
+			}
+
+			// Ball + right paddle collisions
+			else if (ball.x > LED_COLS - PADDLE_WIDTH - BALL_WIDTH && ball.y > paddle2.y - BALL_HEIGHT && ball.y < paddle2.y + PADDLE_HEIGHT) {
+				double theta = ((paddle2.y + PADDLE_HEIGHT / 2.0) - (ball.y + BALL_HEIGHT / 2.0)) / (PADDLE_HEIGHT / 2.0) * MAX_BALL_ANGLE;
+				ball.vx = -BALL_SPEED * cos(theta);
+				ball.vy = BALL_SPEED * -sin(theta);
+			}
+
+			uint8_t scoreWasUpdated = 0;
+
+			// Ball past left paddle
+			if (ball.x < 0) {
+				paddle2.score += 4;
+				resetPong(&paddle1, &paddle2, &ball, 0);
+				scoreWasUpdated = 1;
+			}
+
+			// Ball past right paddle
+			else if (ball.x > LED_COLS - BALL_WIDTH) {
+				paddle1.score += 4;
+				resetPong(&paddle1, &paddle2, &ball, 1);
+				scoreWasUpdated = 1;
+			}
+
+			if (scoreWasUpdated) {
+				if (paddle1.score > 36 || paddle2.score > 36) {
+					resetPongAndScore(&paddle1, &paddle2, &ball);
+				}
+				setPongScore(fpgaSerial, paddle1.score, paddle2.score);
+			}
+
+			// Move ball
+			ball.x += ball.vx * frameTime;
+			ball.y += ball.vy * frameTime;
+
+			setPongData(fpgaSerial, &paddle1, &paddle2, &ball);
+
+			Sleep(1);
+
 			break;
 		}
 	}
